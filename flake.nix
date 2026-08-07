@@ -34,6 +34,9 @@
         default = {
           type = "app";
           program = "${self.packages.${system}.default}/bin/nagi";
+          meta = {
+            description = "Nagi reproducible task-runner MVP";
+          };
         };
       });
 
