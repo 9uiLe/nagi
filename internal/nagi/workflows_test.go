@@ -3,6 +3,7 @@ package nagi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -317,6 +318,66 @@ func TestGHTransportEvaluatesEveryRequiredStatusAndCheckRun(t *testing.T) {
 	}
 }
 
+func TestGHTransportClassifiesUnprotectedCheckRuns(t *testing.T) {
+	for _, test := range []struct {
+		name, checkRun, want string
+	}{
+		{"queued is pending", `{"name":"nix-environment","status":"queued","conclusion":null,"app":{"id":15368}}`, "pending"},
+		{"in progress is pending", `{"name":"nix-environment","status":"in_progress","conclusion":null,"app":{"id":15368}}`, "pending"},
+		{"success passes", `{"name":"nix-environment","status":"completed","conclusion":"success","app":{"id":15368}}`, "passed"},
+		{"failure fails", `{"name":"nix-environment","status":"completed","conclusion":"failure","app":{"id":15368}}`, "failed"},
+		{"cancelled fails", `{"name":"nix-environment","status":"completed","conclusion":"cancelled","app":{"id":15368}}`, "failed"},
+		{"timed out fails", `{"name":"nix-environment","status":"completed","conclusion":"timed_out","app":{"id":15368}}`, "failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			executor := &endpointExecutor{responses: map[string]CommandResult{
+				"pulls/2/reviews":        {Stdout: `[]`},
+				"pulls/2":                {Stdout: `{"number":2,"node_id":"PR_pending","draft":true,"mergeable":true,"mergeable_state":"clean","base":{"ref":"main"},"head":{"ref":"feature","sha":"abc"}}`},
+				"required_status_checks": {ExitStatus: 1, Stderr: "gh: Branch not protected (HTTP 404)"},
+				"/statuses":              {Stdout: `[[]]`},
+				"/check-runs":            {Stdout: `[{"check_runs":[` + test.checkRun + `]}]`},
+			}}
+
+			observation, err := (GHAdapter{Exec: executor}).ObservePullRequest(context.Background(), "acme/project", 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observation.CIState != test.want {
+				t.Fatalf("ciState=%s want %s; calls=%v", observation.CIState, test.want, executor.calls)
+			}
+		})
+	}
+}
+
+func TestUndraftWaitsForEveryRequiredCheckRunToSucceed(t *testing.T) {
+	repository := newTestRepository(t)
+	runCommand(t, repository, "git", "remote", "add", "origin", "https://github.com/acme/nagi-smoke.git")
+	service := newTestService(t, repository)
+	addReadyTask(t, service, "required-checks")
+	run, qa := makePassedQA(t, service, "required-checks")
+	observation := PRObservation{Number: 12, NodeID: "PR_required", Draft: true, TargetBranch: "master", HeadBranch: run.Branch, HeadSHA: qa.ValidatedSHA, CIState: "pending", ConflictState: "none", ReviewState: "none"}
+	seedPullRequest(t, service, run, observation)
+	executor := &endpointExecutor{responses: map[string]CommandResult{
+		"pulls/12/reviews":       {Stdout: `[]`},
+		"pulls/12":               {Stdout: fmt.Sprintf(`{"number":12,"node_id":"PR_required","draft":true,"mergeable":true,"mergeable_state":"clean","base":{"ref":"master"},"head":{"ref":%q,"sha":%q}}`, run.Branch, qa.ValidatedSHA)},
+		"required_status_checks": {Stdout: `{"contexts":[],"checks":[{"context":"lint","app_id":42},{"context":"tests","app_id":42}]}`},
+		"/statuses":              {Stdout: `[[]]`},
+		"/check-runs":            {Stdout: `[{"check_runs":[{"name":"lint","status":"completed","conclusion":"success","app":{"id":42}},{"name":"tests","status":"in_progress","conclusion":null,"app":{"id":42}}]}]`},
+	}}
+	service.GitHub = GHAdapter{Exec: executor}
+
+	decision, err := service.UndraftPullRequest(context.Background(), run.ID, "release")
+	if !errors.Is(err, ErrUndraftBlocked) || !contains(decision.Reasons, "required_ci_not_passed") || countEndpointCalls(executor.calls, "graphql") != 0 {
+		t.Fatalf("decision=%+v err=%v calls=%v", decision, err, executor.calls)
+	}
+
+	executor.responses["/check-runs"] = CommandResult{Stdout: `[{"check_runs":[{"name":"lint","status":"completed","conclusion":"success","app":{"id":42}},{"name":"tests","status":"completed","conclusion":"success","app":{"id":42}}]}]`}
+	decision, err = service.UndraftPullRequest(context.Background(), run.ID, "release")
+	if err != nil || !decision.Ready || countEndpointCalls(executor.calls, "graphql") != 1 {
+		t.Fatalf("decision=%+v err=%v calls=%v", decision, err, executor.calls)
+	}
+}
+
 func makePassedQA(t *testing.T, service *Service, taskID string) (Run, QARun) {
 	t.Helper()
 	run, err := service.StartTask(context.Background(), taskID, StartOptions{Actor: "implementation"})
@@ -386,6 +447,16 @@ func contains(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func countEndpointCalls(calls [][]string, part string) int {
+	count := 0
+	for _, call := range calls {
+		if strings.Contains(strings.Join(call, " "), part) {
+			count++
+		}
+	}
+	return count
 }
 
 var _ = filepath.Join

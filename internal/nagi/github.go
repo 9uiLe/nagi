@@ -121,18 +121,19 @@ func (g GHAdapter) requiredCIState(ctx context.Context, repository, targetBranch
 	if err != nil {
 		return "", err
 	}
-	if protection.ExitStatus != 0 {
-		lower := strings.ToLower(protection.Stderr)
-		if strings.Contains(lower, "404") || strings.Contains(lower, "not found") {
-			return "passed", nil
-		}
-		return "", fmt.Errorf("gh api required checks: %s", strings.TrimSpace(protection.Stderr))
-	}
 	var rules struct {
 		Contexts []string        `json:"contexts"`
 		Checks   []requiredCheck `json:"checks"`
 	}
-	if err := json.Unmarshal([]byte(protection.Stdout), &rules); err != nil {
+	observeAll := false
+	if protection.ExitStatus != 0 {
+		lower := strings.ToLower(protection.Stderr)
+		if strings.Contains(lower, "404") || strings.Contains(lower, "not found") {
+			observeAll = true
+		} else {
+			return "", fmt.Errorf("gh api required checks: %s", strings.TrimSpace(protection.Stderr))
+		}
+	} else if err := json.Unmarshal([]byte(protection.Stdout), &rules); err != nil {
 		return "", err
 	}
 	required := make(map[string]requiredCheck)
@@ -142,7 +143,7 @@ func (g GHAdapter) requiredCIState(ctx context.Context, repository, targetBranch
 	for _, check := range rules.Checks {
 		required[check.Context] = check
 	}
-	if len(required) == 0 {
+	if !observeAll && len(required) == 0 {
 		return "passed", nil
 	}
 	statusesResult, err := g.executor().Run(ctx, "", nil, "gh", "api", "--paginate", "--slurp", "repos/"+repository+"/commits/"+sha+"/statuses")
@@ -202,36 +203,62 @@ func (g GHAdapter) requiredCIState(ctx context.Context, repository, targetBranch
 		}
 	}
 	state := "passed"
+	if observeAll {
+		for _, status := range statuses {
+			state = mergeCIState(state, commitStatusCIState(status))
+		}
+		for _, check := range checks {
+			state = mergeCIState(state, checkRunCIState(check.status, check.conclusion))
+		}
+		return state, nil
+	}
 	for name, requirement := range required {
 		if status, ok := statuses[name]; ok {
-			switch status {
-			case "success":
-				continue
-			case "failure", "error":
-				return "failed", nil
-			default:
-				state = "pending"
-				continue
-			}
+			state = mergeCIState(state, commitStatusCIState(status))
+			continue
 		}
 		if check, ok := checks[name]; ok && (requirement.AppID == 0 || requirement.AppID == check.appID) {
-			if check.status != "completed" {
-				state = "pending"
-				continue
-			}
-			switch check.conclusion {
-			case "success", "neutral", "skipped":
-				continue
-			case "failure", "cancelled", "timed_out", "action_required", "stale":
-				return "failed", nil
-			default:
-				state = "pending"
-				continue
-			}
+			state = mergeCIState(state, checkRunCIState(check.status, check.conclusion))
+			continue
 		}
 		state = "pending"
 	}
 	return state, nil
+}
+
+func commitStatusCIState(status string) string {
+	switch status {
+	case "success":
+		return "passed"
+	case "failure", "error":
+		return "failed"
+	default:
+		return "pending"
+	}
+}
+
+func checkRunCIState(status, conclusion string) string {
+	if status != "completed" {
+		return "pending"
+	}
+	switch conclusion {
+	case "success", "neutral", "skipped":
+		return "passed"
+	case "failure", "cancelled", "timed_out", "action_required", "stale":
+		return "failed"
+	default:
+		return "pending"
+	}
+}
+
+func mergeCIState(current, observed string) string {
+	if current == "failed" || observed == "failed" {
+		return "failed"
+	}
+	if current == "pending" || observed == "pending" {
+		return "pending"
+	}
+	return "passed"
 }
 
 func (g GHAdapter) MarkReady(ctx context.Context, repository, nodeID string) error {
