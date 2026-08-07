@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 
@@ -18,11 +17,27 @@ type commandOutput struct {
 	Error error
 }
 
+type commandFlags struct {
+	*flag.FlagSet
+	usage strings.Builder
+}
+
+func (flags *commandFlags) Parse(args []string) error {
+	err := flags.FlagSet.Parse(args)
+	if errors.Is(err, flag.ErrHelp) {
+		_, _ = fmt.Fprint(os.Stdout, flags.usage.String())
+	}
+	return err
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "__runner-exec" {
 		os.Exit(runWrapped(os.Args[2:]))
 	}
 	output := execute(context.Background(), os.Args[1:])
+	if errors.Is(output.Error, flag.ErrHelp) {
+		return
+	}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetEscapeHTML(false)
 	if output.Error == nil {
@@ -369,16 +384,16 @@ func openService(ctx context.Context, name string, args []string) (*nagi.Service
 	return service, commandOutput{Error: err}
 }
 
-func commonFlags(flags *flag.FlagSet) (*string, *string, *string) {
+func commonFlags(flags *commandFlags) (*string, *string, *string) {
 	projectID := flags.String("project", "", "project ID")
 	stateRoot := flags.String("state-root", "", "external state root")
 	actor := flags.String("actor", "cli", "audit actor")
 	return projectID, stateRoot, actor
 }
 
-func newFlags(name string) *flag.FlagSet {
-	flags := flag.NewFlagSet(name, flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
+func newFlags(name string) *commandFlags {
+	flags := &commandFlags{FlagSet: flag.NewFlagSet(name, flag.ContinueOnError)}
+	flags.SetOutput(&flags.usage)
 	return flags
 }
 
