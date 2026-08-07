@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ const schemaVersion = 1
 type Store struct {
 	db            *sql.DB
 	clock         Clock
+	writeMu       sync.Mutex
 	writeLockFile *os.File
 }
 
@@ -55,12 +57,17 @@ func OpenStore(path string, clock Clock) (*Store, error) {
 func (s *Store) Close() error { return errors.Join(s.db.Close(), s.writeLockFile.Close()) }
 
 func (s *Store) acquireWrite() (func(), error) {
+	s.writeMu.Lock()
 	for {
 		err := syscall.Flock(int(s.writeLockFile.Fd()), syscall.LOCK_EX)
 		if err == nil {
-			return func() { _ = syscall.Flock(int(s.writeLockFile.Fd()), syscall.LOCK_UN) }, nil
+			return func() {
+				_ = syscall.Flock(int(s.writeLockFile.Fd()), syscall.LOCK_UN)
+				s.writeMu.Unlock()
+			}, nil
 		}
 		if !errors.Is(err, syscall.EINTR) {
+			s.writeMu.Unlock()
 			return nil, err
 		}
 	}
