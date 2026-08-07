@@ -12,6 +12,52 @@ import (
 	"testing"
 )
 
+func TestCLITaskAddReportsValidationErrorsWithoutDetails(t *testing.T) {
+	repository := newTestRepository(t)
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	_, filename, _, _ := runtime.Caller(0)
+	moduleRoot, err := filepath.Abs(filepath.Join(filepath.Dir(filename), "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "nagi")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/nagi")
+	build.Dir = moduleRoot
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, output)
+	}
+	initResult, exit := runCLI(binary, "init", "--repo", repository, "--state-root", stateRoot)
+	if exit != 0 {
+		t.Fatalf("init exit=%d output=%s", exit, initResult)
+	}
+	projectID := nestedString(t, initResult, "result", "project", "projectId")
+
+	tests := []struct {
+		name    string
+		message string
+		args    []string
+	}{
+		{name: "invalid lane", message: "integration lane must be base or master", args: []string{"--id", "invalid-lane", "--title", "invalid lane", "--lane", "main", "--base", "main"}},
+		{name: "missing title", message: "task id and title are required", args: []string{"--id", "missing-title", "--lane", "master", "--base", "master"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args := []string{"task", "add", "--project", projectID, "--state-root", stateRoot}
+			result, exit := runCLI(binary, append(args, test.args...)...)
+			payload := decodeCLI(t, result)
+			if exit != 2 || payload["reason"] != "invalid_arguments" {
+				t.Fatalf("exit=%d output=%s", exit, result)
+			}
+			if payload["error"] != test.message {
+				t.Fatalf("error=%q, want %q", payload["error"], test.message)
+			}
+			if _, ok := payload["details"]; ok {
+				t.Fatalf("validation failure included details: %s", result)
+			}
+		})
+	}
+}
+
 func TestMultipleCLIProcessesClaimOnceAndResumePersistedOperation(t *testing.T) {
 	repository := newTestRepository(t)
 	stateRoot := filepath.Join(t.TempDir(), "state")
