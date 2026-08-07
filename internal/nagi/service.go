@@ -178,10 +178,10 @@ func (s *Service) Close() error { return s.Store.Close() }
 
 func (s *Service) AddTask(ctx context.Context, task Task, actor string) (Task, error) {
 	if task.ID == "" || task.Title == "" {
-		return Task{}, fmt.Errorf("task id and title are required")
+		return Task{}, invalidArgument("task id and title are required")
 	}
 	if task.IntegrationLane != "base" && task.IntegrationLane != "master" {
-		return Task{}, fmt.Errorf("integration lane must be base or master")
+		return Task{}, invalidArgument("integration lane must be base or master")
 	}
 	if task.BaseRef == "" {
 		task.BaseRef = "master"

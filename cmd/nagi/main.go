@@ -142,7 +142,10 @@ func taskCommand(ctx context.Context, args []string) commandOutput {
 		}
 		defer service.Close()
 		task, err := service.AddTask(ctx, nagi.Task{ID: *id, Title: *title, ParentID: *parent, DependencyID: *dependency, IntegrationLane: *lane, BaseRef: *base}, *actor)
-		return commandOutput{Value: task, Error: err}
+		if err != nil {
+			return commandOutput{Error: err}
+		}
+		return commandOutput{Value: task}
 	case "list":
 		service, output := openService(ctx, "task list", args[1:])
 		if output.Error != nil {
@@ -397,6 +400,8 @@ func reason(err error) string {
 		return "injected_fault"
 	case errors.Is(err, nagi.ErrUnsafePath):
 		return "unsafe_path"
+	case errors.Is(err, nagi.ErrInvalidArgument):
+		return "invalid_arguments"
 	case errors.Is(err, nagi.ErrInvalidState):
 		return "invalid_state"
 	default:
