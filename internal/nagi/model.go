@@ -7,16 +7,28 @@ import (
 )
 
 var (
-	ErrAlreadyClaimed = errors.New("task already claimed")
-	ErrNotFound       = errors.New("not found")
-	ErrNotReady       = errors.New("task is not ready")
-	ErrUnsafePath     = errors.New("path is outside the allowed root")
-	ErrPrerequisite   = errors.New("host prerequisite unavailable")
-	ErrCleanupBlocked = errors.New("cleanup safety conditions are not satisfied")
-	ErrUndraftBlocked = errors.New("pull request cannot be marked ready")
-	ErrInjectedFault  = errors.New("injected fault")
-	ErrInvalidState   = errors.New("invalid state transition")
+	ErrAlreadyClaimed  = errors.New("task already claimed")
+	ErrNotFound        = errors.New("not found")
+	ErrNotReady        = errors.New("task is not ready")
+	ErrUnsafePath      = errors.New("path is outside the allowed root")
+	ErrPrerequisite    = errors.New("host prerequisite unavailable")
+	ErrCleanupBlocked  = errors.New("cleanup safety conditions are not satisfied")
+	ErrUndraftBlocked  = errors.New("pull request cannot be marked ready")
+	ErrInjectedFault   = errors.New("injected fault")
+	ErrInvalidArgument = errors.New("invalid argument")
+	ErrInvalidState    = errors.New("invalid state transition")
 )
+
+type invalidArgumentError struct {
+	message string
+}
+
+func (err invalidArgumentError) Error() string { return err.message }
+func (err invalidArgumentError) Unwrap() error { return ErrInvalidArgument }
+
+func invalidArgument(message string) error {
+	return invalidArgumentError{message: message}
+}
 
 type Project struct {
 	ID         string    `json:"projectId"`
