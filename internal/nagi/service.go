@@ -484,7 +484,7 @@ func (s *Service) CompleteRun(ctx context.Context, runID, disposition, actor str
 			return Run{}, err
 		}
 		if !integrated {
-			return Run{}, fmt.Errorf("final SHA is not integrated: %w", ErrCleanupBlocked)
+			return run, IntegrationBlockedError{FinalSHA: finalSHA, BaseRef: task.BaseRef}
 		}
 	}
 	_, artifactErr := os.Stat(run.RunnerLogPath)

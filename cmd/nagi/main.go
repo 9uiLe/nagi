@@ -281,6 +281,10 @@ func runCommand(ctx context.Context, args []string) commandOutput {
 		return commandOutput{Value: run, Error: err}
 	case "complete":
 		run, err := service.CompleteRun(ctx, *runID, *disposition, *actor)
+		var blocked nagi.IntegrationBlockedError
+		if errors.As(err, &blocked) {
+			return commandOutput{Value: blocked, Error: err}
+		}
 		return commandOutput{Value: run, Error: err}
 	default:
 		return commandOutput{Error: fmt.Errorf("unknown run subcommand %q", args[0])}

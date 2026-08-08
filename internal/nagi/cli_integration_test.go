@@ -8,9 +8,89 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 )
+
+func TestCLICompleteIntegratedReportsStaleLocalBaseWithoutMutatingGit(t *testing.T) {
+	repository := newTestRepository(t)
+	runCommand(t, repository, "git", "branch", "-m", "main")
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	_, filename, _, _ := runtime.Caller(0)
+	moduleRoot, err := filepath.Abs(filepath.Join(filepath.Dir(filename), "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "nagi")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/nagi")
+	build.Dir = moduleRoot
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, output)
+	}
+
+	initResult, exit := runCLI(binary, "init", "--repo", repository, "--state-root", stateRoot)
+	if exit != 0 {
+		t.Fatalf("init exit=%d output=%s", exit, initResult)
+	}
+	projectID := nestedString(t, initResult, "result", "project", "projectId")
+	addResult, exit := runCLI(binary, "task", "add", "--project", projectID, "--state-root", stateRoot, "--id", "stale-base", "--title", "stale base", "--lane", "master", "--base", "main")
+	if exit != 0 {
+		t.Fatalf("add exit=%d output=%s", exit, addResult)
+	}
+	startResult, exit := runCLI(binary, "task", "start", "--project", projectID, "--state-root", stateRoot, "--task", "stale-base")
+	if exit != 0 {
+		t.Fatalf("start exit=%d output=%s", exit, startResult)
+	}
+	runID := nestedString(t, startResult, "result", "id")
+	worktree := nestedString(t, startResult, "result", "worktreePath")
+	runBranch := nestedString(t, startResult, "result", "branch")
+	eventuallyReadStatus(t, nestedString(t, startResult, "result", "runnerStatusPath"))
+
+	mustWrite(t, filepath.Join(worktree, "candidate.txt"), []byte("candidate\n"))
+	runCommand(t, worktree, "git", "add", "candidate.txt")
+	runCommand(t, worktree, "git", "commit", "-m", "candidate")
+	finalSHA := strings.TrimSpace(runCommand(t, worktree, "git", "rev-parse", "HEAD"))
+
+	runCommand(t, repository, "git", "checkout", "-b", "simulated-origin-main")
+	runCommand(t, repository, "git", "merge", "--no-ff", runBranch, "-m", "merge candidate")
+	remoteBaseSHA := strings.TrimSpace(runCommand(t, repository, "git", "rev-parse", "HEAD"))
+	runCommand(t, repository, "git", "update-ref", "refs/remotes/origin/main", remoteBaseSHA)
+	runCommand(t, repository, "git", "checkout", "main")
+	localBaseSHA := strings.TrimSpace(runCommand(t, repository, "git", "rev-parse", "main"))
+	git := GitAdapter{}
+	if integrated, err := git.IsAncestor(t.Context(), repository, finalSHA, "origin/main"); err != nil || !integrated {
+		t.Fatalf("candidate is not integrated into simulated remote base: integrated=%v err=%v", integrated, err)
+	}
+	if integrated, err := git.IsAncestor(t.Context(), repository, finalSHA, "main"); err != nil || integrated {
+		t.Fatalf("local base is not stale: integrated=%v err=%v", integrated, err)
+	}
+
+	completeResult, exit := runCLI(binary, "run", "complete", "--project", projectID, "--state-root", stateRoot, "--run", runID, "--disposition", "integrated")
+	payload := decodeCLI(t, completeResult)
+	if exit != 12 || payload["ok"] != false || payload["reason"] != "cleanup_blocked" {
+		t.Fatalf("exit=%d payload=%v", exit, payload)
+	}
+	details, ok := payload["details"].(map[string]any)
+	if !ok || len(details) != 2 || details["finalSha"] != finalSHA || details["baseRef"] != "main" {
+		t.Fatalf("unsafe or incomplete details: %v", payload["details"])
+	}
+	message, _ := payload["error"].(string)
+	if !strings.Contains(message, "update the local base ref") {
+		t.Fatalf("error does not explain the safe remedy: %q", message)
+	}
+
+	for ref, before := range map[string]string{"main": localBaseSHA, "origin/main": remoteBaseSHA, runBranch: finalSHA} {
+		after := strings.TrimSpace(runCommand(t, repository, "git", "rev-parse", ref))
+		if after != before {
+			t.Fatalf("ref %s changed from %s to %s", ref, before, after)
+		}
+	}
+	worktreeSHA := strings.TrimSpace(runCommand(t, worktree, "git", "rev-parse", "HEAD"))
+	if worktreeSHA != finalSHA {
+		t.Fatalf("worktree changed from %s to %s", finalSHA, worktreeSHA)
+	}
+}
 
 func TestCLITaskAddReportsValidationErrorsWithoutDetails(t *testing.T) {
 	repository := newTestRepository(t)
