@@ -30,6 +30,17 @@ func invalidArgument(message string) error {
 	return invalidArgumentError{message: message}
 }
 
+type IntegrationBlockedError struct {
+	FinalSHA string `json:"finalSha"`
+	BaseRef  string `json:"baseRef"`
+}
+
+func (err IntegrationBlockedError) Error() string {
+	return "final SHA is not integrated into the local base ref; if the change was merged remotely, update the local base ref and retry: " + ErrCleanupBlocked.Error()
+}
+
+func (err IntegrationBlockedError) Unwrap() error { return ErrCleanupBlocked }
+
 type Project struct {
 	ID         string    `json:"projectId"`
 	Repository string    `json:"repository"`
